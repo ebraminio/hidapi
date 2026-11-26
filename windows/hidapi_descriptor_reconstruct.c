@@ -141,6 +141,8 @@ static struct rd_main_item_node * rd_append_main_item_node(int first_bit, int la
 	}
 
 	new_list_node = (struct rd_main_item_node *)malloc(sizeof(*new_list_node)); // Create new list entry
+	if (new_list_node == NULL)
+		return NULL;
 	new_list_node->FirstBit = first_bit;
 	new_list_node->LastBit = last_bit;
 	new_list_node->TypeOfNode = type_of_node;
@@ -157,10 +159,19 @@ static struct rd_main_item_node * rd_append_main_item_node(int first_bit, int la
 static struct  rd_main_item_node * rd_insert_main_item_node(int first_bit, int last_bit, rd_node_type type_of_node, int caps_index, int collection_index, rd_main_items main_item_type, unsigned char report_id, struct rd_main_item_node **list) {
 	// Insert item after the main item node referenced by list
 	struct rd_main_item_node *next_item = (*list)->next;
-	(*list)->next = NULL;
-	rd_append_main_item_node(first_bit, last_bit, type_of_node, caps_index, collection_index, main_item_type, report_id, list);
-	(*list)->next->next = next_item;
-	return (*list)->next;
+	struct rd_main_item_node *new_list_node = (struct rd_main_item_node *)malloc(sizeof(*new_list_node));
+	if (new_list_node == NULL)
+		return NULL;
+	new_list_node->FirstBit = first_bit;
+	new_list_node->LastBit = last_bit;
+	new_list_node->TypeOfNode = type_of_node;
+	new_list_node->CapsIndex = caps_index;
+	new_list_node->CollectionIndex = collection_index;
+	new_list_node->MainItemType = main_item_type;
+	new_list_node->ReportID = report_id;
+	new_list_node->next = next_item;
+	(*list)->next = new_list_node;
+	return new_list_node;
 }
 
 static struct rd_main_item_node * rd_search_main_item_list_for_bit_position(int search_bit, rd_main_items main_item_type, unsigned char report_id, struct rd_main_item_node **list) {
@@ -193,6 +204,18 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 		.byte_idx = 0
 	};
 
+	int result = -1;
+	rd_bit_range ****coll_bit_range = NULL;
+	int *coll_levels = NULL;
+	int *coll_number_of_direct_childs = NULL;
+	USHORT **coll_child_order = NULL;
+	BOOLEAN *coll_parsed_flag = NULL;
+	int *coll_last_written_child = NULL;
+	struct rd_main_item_node **coll_begin_lookup = NULL;
+	struct rd_main_item_node **coll_end_lookup = NULL;
+	struct rd_main_item_node *main_item_list = NULL;
+
+	do {
 	// Set pointer to the first node of link_collection_nodes
 	phid_pp_link_collection_node link_collection_nodes = (phid_pp_link_collection_node)(((unsigned char*)&pp_data->caps[0]) + pp_data->FirstByteOfLinkCollectionArray);
 
@@ -202,14 +225,21 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 	// ****************************************************************************************************************************
 	
 	// Allocate memory and initialize lookup table
-	rd_bit_range ****coll_bit_range;
-	coll_bit_range = (rd_bit_range ****)malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_bit_range));
+	coll_bit_range = (rd_bit_range ****)calloc(pp_data->NumberLinkCollectionNodes, sizeof(*coll_bit_range));
+	if (coll_bit_range == NULL)
+		goto cleanup;
 	for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++) {
-		coll_bit_range[collection_node_idx] = (rd_bit_range ***)malloc(256 * sizeof(*coll_bit_range[0])); // 256 possible report IDs (incl. 0x00)
+		coll_bit_range[collection_node_idx] = (rd_bit_range ***)calloc(256, sizeof(*coll_bit_range[0])); // 256 possible report IDs (incl. 0x00)
+		if (coll_bit_range[collection_node_idx] == NULL)
+			goto cleanup;
 		for (int reportid_idx = 0; reportid_idx < 256; reportid_idx++) {
-			coll_bit_range[collection_node_idx][reportid_idx] = (rd_bit_range **)malloc(NUM_OF_HIDP_REPORT_TYPES * sizeof(*coll_bit_range[0][0]));
+			coll_bit_range[collection_node_idx][reportid_idx] = (rd_bit_range **)calloc(NUM_OF_HIDP_REPORT_TYPES, sizeof(*coll_bit_range[0][0]));
+			if (coll_bit_range[collection_node_idx][reportid_idx] == NULL)
+				goto cleanup;
 			for (int rt_idx = 0; rt_idx < NUM_OF_HIDP_REPORT_TYPES; rt_idx++) {
 				coll_bit_range[collection_node_idx][reportid_idx][rt_idx] = (rd_bit_range *)malloc(sizeof(rd_bit_range));
+				if (coll_bit_range[collection_node_idx][reportid_idx][rt_idx] == NULL)
+					goto cleanup;
 				coll_bit_range[collection_node_idx][reportid_idx][rt_idx]->FirstBit = -1;
 				coll_bit_range[collection_node_idx][reportid_idx][rt_idx]->LastBit = -1;
 			}
@@ -241,8 +271,10 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 	//  coll_number_of_direct_childs[COLLECTION_INDEX]
 	// *************************************************************************
 	int max_coll_level = 0;
-	int *coll_levels = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_levels[0]));
-	int *coll_number_of_direct_childs = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_number_of_direct_childs[0]));
+	coll_levels = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_levels[0]));
+	coll_number_of_direct_childs = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_number_of_direct_childs[0]));
+	if (coll_levels == NULL || coll_number_of_direct_childs == NULL)
+		goto cleanup;
 	memset(coll_levels, -1,
 	       pp_data->NumberLinkCollectionNodes * sizeof(coll_levels[0]));
 	memset(coll_number_of_direct_childs, 0,
@@ -307,9 +339,11 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 	// Determine child collection order of the whole hierarchy, based on previously determined bit ranges
 	// and store it this index coll_child_order[COLLECTION_INDEX][DIRECT_CHILD_INDEX]
 	// **************************************************************************************************
-	USHORT **coll_child_order = (USHORT **)malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_child_order));
+	coll_child_order = (USHORT **)calloc(pp_data->NumberLinkCollectionNodes, sizeof(*coll_child_order));
+	coll_parsed_flag = (BOOLEAN *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_parsed_flag[0]));
+	if (coll_child_order == NULL || coll_parsed_flag == NULL)
+		goto cleanup;
 	{
-		BOOLEAN *coll_parsed_flag = (BOOLEAN *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_parsed_flag[0]));
 		for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++) {
 			coll_parsed_flag[collection_node_idx] = FALSE;
 		}
@@ -320,6 +354,8 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 				(coll_parsed_flag[link_collection_nodes[collection_node_idx].FirstChild] == FALSE)) {
 				coll_parsed_flag[link_collection_nodes[collection_node_idx].FirstChild] = TRUE;
 				coll_child_order[collection_node_idx] = (USHORT *)malloc((coll_number_of_direct_childs[collection_node_idx]) * sizeof(*coll_child_order[0]));
+				if (coll_child_order[collection_node_idx] == NULL)
+					goto cleanup;
 
 				{
 					// Create list of child collection indices
@@ -369,19 +405,19 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 				}
 			}
 		}
-		free(coll_parsed_flag);
 	}
 
 
 	// ***************************************************************************************
 	// Create sorted main_item_list containing all the Collection and CollectionEnd main items
 	// ***************************************************************************************
-	struct rd_main_item_node *main_item_list = NULL; // List root
 	// Lookup table to find the Collection items in the list by index
-	struct rd_main_item_node **coll_begin_lookup = (struct rd_main_item_node **)malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_begin_lookup));
-	struct rd_main_item_node **coll_end_lookup = (struct rd_main_item_node **)malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_end_lookup));
+	coll_begin_lookup = (struct rd_main_item_node **)calloc(pp_data->NumberLinkCollectionNodes, sizeof(*coll_begin_lookup));
+	coll_end_lookup = (struct rd_main_item_node **)calloc(pp_data->NumberLinkCollectionNodes, sizeof(*coll_end_lookup));
+	coll_last_written_child = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_last_written_child[0]));
+	if (coll_begin_lookup == NULL || coll_end_lookup == NULL || coll_last_written_child == NULL)
+		goto cleanup;
 	{
-		int *coll_last_written_child = (int *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_last_written_child[0]));
 		memset(coll_last_written_child, -1,
 		       pp_data->NumberLinkCollectionNodes * sizeof(coll_last_written_child[0]));
 
@@ -390,6 +426,8 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 		struct rd_main_item_node *firstDelimiterNode = NULL;
 		struct rd_main_item_node *delimiterCloseNode = NULL;
 		coll_begin_lookup[0] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_collection, 0, &main_item_list);
+		if (coll_begin_lookup[0] == NULL)
+			goto cleanup;
 		while (actual_coll_level >= 0) {
 			if ((coll_number_of_direct_childs[collection_node_idx] != 0) &&
 				(coll_last_written_child[collection_node_idx] == -1)) {
@@ -406,12 +444,18 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 					// Aliased Collection (First node in link_collection_nodes -> Last entry in report descriptor output)
 					firstDelimiterNode = main_item_list;
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_usage, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_close, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					delimiterCloseNode = main_item_list;
 				}
 				else {
 					// Normal not aliased collection
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_collection, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					actual_coll_level++;
 				}
 
@@ -432,31 +476,44 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 					// Aliased Collection (First node in link_collection_nodes -> Last entry in report descriptor output)
 					firstDelimiterNode = main_item_list;
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_usage, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_close, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					delimiterCloseNode = main_item_list;
 				}
 				else if (link_collection_nodes[collection_node_idx].IsAlias && (firstDelimiterNode != NULL)) {
 					coll_begin_lookup[collection_node_idx] = rd_insert_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_usage, 0, &firstDelimiterNode);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 				}
 				else if (!link_collection_nodes[collection_node_idx].IsAlias && (firstDelimiterNode != NULL)) {
 					coll_begin_lookup[collection_node_idx] = rd_insert_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_usage, 0, &firstDelimiterNode);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					coll_begin_lookup[collection_node_idx] = rd_insert_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_delimiter_open, 0, &firstDelimiterNode);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					firstDelimiterNode = NULL;
 					main_item_list = delimiterCloseNode;
 					delimiterCloseNode = NULL; // Last entry of alias has .IsAlias == FALSE
 				}
 				if (!link_collection_nodes[collection_node_idx].IsAlias) {
 					coll_begin_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_collection, 0, &main_item_list);
+					if (coll_begin_lookup[collection_node_idx] == NULL)
+						goto cleanup;
 					actual_coll_level++;
 				}
 			}
 			else {
 				actual_coll_level--;
 				coll_end_lookup[collection_node_idx] = rd_append_main_item_node(0, 0, rd_item_node_collection, 0, collection_node_idx, rd_collection_end, 0, &main_item_list);
+				if (coll_end_lookup[collection_node_idx] == NULL)
+					goto cleanup;
 				collection_node_idx = link_collection_nodes[collection_node_idx].Parent;
 			}
 		}
-		free(coll_last_written_child);
 	}
 
 
@@ -495,22 +552,28 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 			if (pp_data->caps[caps_idx].IsAlias && (firstDelimiterNode == NULL)) {
 				// Aliased Usage (First node in pp_data->caps -> Last entry in report descriptor output)
 				firstDelimiterNode = list_node;
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node);
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_close, pp_data->caps[caps_idx].ReportID, &list_node);
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_close, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
 				delimiterCloseNode = list_node;
 			} else if (pp_data->caps[caps_idx].IsAlias && (firstDelimiterNode != NULL)) {
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node);
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
 			}
 			else if (!pp_data->caps[caps_idx].IsAlias && (firstDelimiterNode != NULL)) {
 				// Aliased Collection (Last node in pp_data->caps -> First entry in report descriptor output)
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node);
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_open, pp_data->caps[caps_idx].ReportID, &list_node);
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_usage, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, rd_delimiter_open, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
 				firstDelimiterNode = NULL;
 				list_node = delimiterCloseNode;
 				delimiterCloseNode = NULL; // Last entry of alias has .IsAlias == FALSE
 			}
 			if (!pp_data->caps[caps_idx].IsAlias) {
-				rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, (rd_main_items) rt_idx, pp_data->caps[caps_idx].ReportID, &list_node);
+				if (rd_insert_main_item_node(first_bit, last_bit, rd_item_node_cap, caps_idx, pp_data->caps[caps_idx].LinkCollection, (rd_main_items) rt_idx, pp_data->caps[caps_idx].ReportID, &list_node) == NULL)
+					goto cleanup;
 			}
 		}
 	}
@@ -546,7 +609,8 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 						(last_report_item_lookup[list->MainItemType][list->ReportID]->FirstBit != list->FirstBit) // Happens in case of IsMultipleItemsForArray for multiple dedicated usages for a multi-button array
 						) {
 						struct rd_main_item_node *list_node = rd_search_main_item_list_for_bit_position(last_bit_position[list->MainItemType][list->ReportID], list->MainItemType, list->ReportID, &last_report_item_lookup[list->MainItemType][list->ReportID]);
-						rd_insert_main_item_node(last_bit_position[list->MainItemType][list->ReportID] + 1, list->FirstBit - 1, rd_item_node_padding, -1, 0, list->MainItemType, list->ReportID, &list_node);
+						if (rd_insert_main_item_node(last_bit_position[list->MainItemType][list->ReportID] + 1, list->FirstBit - 1, rd_item_node_padding, -1, 0, list->MainItemType, list->ReportID, &list_node) == NULL)
+							goto cleanup;
 					}
 					if (list->ReportID != 0) {
 						devicehasReportIDs = TRUE;
@@ -569,7 +633,8 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 					int padding = 8 - ((last_bit_position[rt_idx][reportid_idx] + 1) % 8);
 					if (padding < 8) {
 						// Insert padding item after item referenced in last_report_item_lookup
-						rd_insert_main_item_node(last_bit_position[rt_idx][reportid_idx] + 1, last_bit_position[rt_idx][reportid_idx] + padding, rd_item_node_padding, -1, 0, (rd_main_items) rt_idx, (unsigned char) reportid_idx, &last_report_item_lookup[rt_idx][reportid_idx]);
+						if (rd_insert_main_item_node(last_bit_position[rt_idx][reportid_idx] + 1, last_bit_position[rt_idx][reportid_idx] + padding, rd_item_node_padding, -1, 0, (rd_main_items) rt_idx, (unsigned char) reportid_idx, &last_report_item_lookup[rt_idx][reportid_idx]) == NULL)
+							goto cleanup;
 						if (last_report_item_lookup[rt_idx][reportid_idx] == node_before_top_level_coll_end) {
 							// If this padding item is at the end of the top level collection, update node_before_top_level_coll_end
 							node_before_top_level_coll_end = last_report_item_lookup[rt_idx][reportid_idx]->next;
@@ -591,7 +656,8 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 
 				if (padding > 0) {
 					// Insert padding item after item referenced in last_report_item_lookup
-					rd_insert_main_item_node(last_bit_position[rt_idx][reportId] + 1, last_bit_position[rt_idx][reportId] + padding, rd_item_node_padding, -1, 0, (rd_main_items)rt_idx, reportId, &node_before_top_level_coll_end);
+					if (rd_insert_main_item_node(last_bit_position[rt_idx][reportId] + 1, last_bit_position[rt_idx][reportId] + padding, rd_item_node_padding, -1, 0, (rd_main_items)rt_idx, reportId, &node_before_top_level_coll_end) == NULL)
+						goto cleanup;
 				}
 			}
 		}
@@ -999,26 +1065,44 @@ int hid_winapi_descriptor_reconstruct_pp_data(void *preparsed_data, unsigned cha
 		free(main_item_list_prev);
 	}
 
-	// Free multidimensionable array: coll_bit_range[COLLECTION_INDEX][REPORT_ID][INPUT/OUTPUT/FEATURE]
-	// Free multidimensionable array: coll_child_order[COLLECTION_INDEX][DIRECT_CHILD_INDEX]
-	for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++) {
-		for (int reportid_idx = 0; reportid_idx < 256; reportid_idx++) {
-			for (int rt_idx = 0; rt_idx < NUM_OF_HIDP_REPORT_TYPES; rt_idx++) {
-				free(coll_bit_range[collection_node_idx][reportid_idx][rt_idx]);
-			}
-			free(coll_bit_range[collection_node_idx][reportid_idx]);
-		}
-		free(coll_bit_range[collection_node_idx]);
-		if (coll_number_of_direct_childs[collection_node_idx] != 0) free(coll_child_order[collection_node_idx]);
-	}
-	free(coll_bit_range);
-	free(coll_child_order);
+	result = (int)rpt_desc.byte_idx;
+	} while (0);
 
-	// Free one dimensional arrays
+cleanup:
+	while (main_item_list != NULL) {
+		struct rd_main_item_node *next = main_item_list->next;
+		free(main_item_list);
+		main_item_list = next;
+	}
+
+	if (coll_bit_range != NULL) {
+		for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++) {
+			if (coll_bit_range[collection_node_idx] == NULL)
+				continue;
+			for (int reportid_idx = 0; reportid_idx < 256; reportid_idx++) {
+				if (coll_bit_range[collection_node_idx][reportid_idx] == NULL)
+					continue;
+				for (int rt_idx = 0; rt_idx < NUM_OF_HIDP_REPORT_TYPES; rt_idx++)
+					free(coll_bit_range[collection_node_idx][reportid_idx][rt_idx]);
+				free(coll_bit_range[collection_node_idx][reportid_idx]);
+			}
+			free(coll_bit_range[collection_node_idx]);
+		}
+		free(coll_bit_range);
+	}
+
+	if (coll_child_order != NULL) {
+		for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++)
+			free(coll_child_order[collection_node_idx]);
+		free(coll_child_order);
+	}
+
 	free(coll_begin_lookup);
 	free(coll_end_lookup);
 	free(coll_levels);
 	free(coll_number_of_direct_childs);
+	free(coll_parsed_flag);
+	free(coll_last_written_child);
 
-	return (int) rpt_desc.byte_idx;
+	return result;
 }
